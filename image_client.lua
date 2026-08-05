@@ -7,6 +7,7 @@ ImageClient.DEFAULT_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 ImageClient.NIM_DEFAULT_MODEL = "stabilityai/stable-diffusion-3.5-large"
 ImageClient.MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 ImageClient.MAX_IMAGE_BYTES = 15 * 1024 * 1024
+ImageClient.MAX_PROMPT_LENGTH = 2048
 
 local CLOUDFLARE_MODELS = {
   ["@cf/black-forest-labs/flux-1-schnell"] = {
@@ -57,10 +58,10 @@ function ImageClient.seed(definition, context)
   return hash(table.concat(parts, "|"))
 end
 
-local function list(values, fallback)
+local function list(values, fallback, itemMax)
   local out = {}
   for _, value in ipairs(type(values) == "table" and values or {}) do
-    value = safeText(value, 32)
+    value = safeText(value, itemMax or 32)
     if value ~= "" then out[#out + 1] = value end
     if #out == 3 then break end
   end
@@ -69,30 +70,37 @@ end
 
 function ImageClient.prompt(definition)
   definition = definition or {}
-  return table.concat({
-    "Create a clean two-view battle-sprite reference sheet of one original fantasy creature.",
-    "The left half must show its full body from the front; the right half must show the exact same creature from the rear.",
+  local prompt = table.concat({
+    "Create one original Pokemon-like fantasy monster as a clean two-view"
+      .. " battle-sprite sheet; do not copy an existing Pokemon.",
+    "The left half must show its full body in a lively three-quarter front battle pose;"
+      .. " the right half must show the exact same creature from the rear.",
     "Keep anatomy, proportions, colors, and markings consistent between views.",
-    "Creature direction: " .. safeText(definition.visualDescription, 220) .. ".",
+    "Creature: " .. safeText(definition.visualDescription, 220) .. ".",
     "Body plan: " .. safeText(definition.shape, 24) .. "; distinctive features: "
-      .. list(definition.features, "simple readable features") .. ".",
-    "Body colors: " .. list(definition.bodyColors, "a restrained natural palette")
-      .. "; markings: " .. safeText(definition.markings, 100) .. ".",
-    "Pose: " .. safeText(definition.pose, 80) .. "; surface texture: "
-      .. safeText(definition.texture, 80) .. ".",
-    "Render both views in the authentic visual language of a classic first-generation"
-      .. " late-1990s monochrome handheld creature RPG.",
-    "Use chunky deliberate pixel clusters, a bold dark outline, exactly four grayscale"
-      .. " tones, sparse one-bit dithering, and no antialiasing or smooth vector edges.",
-    "Keep the simple compact proportions, high contrast, and charmingly irregular"
-      .. " hand-pixeled shading of a 56-by-56 front battle sprite.",
-    "Make the rear view even simpler and coarser so it remains readable as a classic"
-      .. " 32-by-32 back sprite.",
-    "Isolated and centered, strong readable silhouette, pure flat white background.",
-    "No scenery, ground, cast shadow, text, labels, border, frame, props, logo, or other creatures.",
-    "This must look like actual monochrome pixel art from that handheld era, not modern"
-      .. " full-color concept art, a 3D render, or merely pixelated digital painting.",
+      .. list(definition.features, "simple readable features", 24) .. ".",
+    "Colors: " .. list(definition.bodyColors, "a restrained natural palette", 24)
+      .. "; markings: " .. safeText(definition.markings, 72) .. ".",
+    "Pose: " .. safeText(definition.pose, 64) .. "; surface texture: "
+      .. safeText(definition.texture, 64) .. ".",
+    "Make it a designed elemental monster, never as an ordinary real-world animal.",
+    "Use Generation 1 Pokemon caricature: compact body, oversized expressive head and eyes,"
+      .. " chunky simplified limbs, and one or two bold fantasy features.",
+    "Simplify fur, feathers, scales, muscles, and joints into graphic clusters; avoid natural"
+      .. " animal proportions, fine hair, realistic anatomy, and wildlife poses.",
+    "Render both views as Pokemon Red and Blue battle sprites on the original Game Boy,"
+      .. " not later-generation or promotional art.",
+    "Use chunky pixel clusters, a dark outline, exactly four grayscale tones, sparse one-bit"
+      .. " dithering, and no antialiasing or smooth vector edges.",
+    "Match a 56-by-56 front sprite; make the 32-by-32 back sprite simpler and coarser but readable.",
+    "Center one strong silhouette on pure white. No scenery, ground, shadow, text, labels,"
+      .. " border, frame, props, logo, or other creatures.",
+    "It must look like monochrome handheld pixel art, not modern full-color concept art,"
+      .. " a 3D render, or pixelated digital painting.",
   }, " ")
+  -- Workers AI rejects FLUX prompts longer than 2,048 characters. Keep this
+  -- final guard even though each model-supplied field is independently bounded.
+  return safeText(prompt, ImageClient.MAX_PROMPT_LENGTH)
 end
 
 local function decodeBase64(encoded)

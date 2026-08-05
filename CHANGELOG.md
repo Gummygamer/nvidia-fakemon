@@ -2,10 +2,13 @@
 
 ## Unreleased
 
+- Keep generated image prompts within Cloudflare Workers AI's 2,048-character
+  limit, including definitions whose visual fields reach their maximum sizes.
 - Generate and validate species-specific level-1 moves and level-up learnsets,
   with type-aware fallback progressions for legacy or incomplete definitions.
-- Prompt Cloudflare source art as four-tone, hand-pixeled classic Generation I
-  battle sprites instead of polished modern full-color creature artwork.
+- Prompt source art with explicit Pokemon Red and Blue battle-sprite anatomy,
+  silhouette, and pixel constraints so designs read as stylized Generation I
+  monsters instead of realistic animals or polished modern creature artwork.
 - Exclude every built-in and previously generated species name from metadata
   prompts, and reject a response that still returns an exact collision.
 - Give Cloudflare authentication fallback an actionable expired-token

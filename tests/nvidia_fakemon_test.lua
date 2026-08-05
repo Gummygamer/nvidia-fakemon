@@ -100,13 +100,31 @@ T.eq(imageRequest.seed, seedA, "image request carries the deterministic seed")
 T.check(imageRequest.prompt:find("left half", 1, true) ~= nil
   and imageRequest.prompt:find("right half", 1, true) ~= nil,
   "one source sheet requests consistent front and rear views")
-T.check(imageRequest.prompt:find("first%-generation") ~= nil
+T.check(imageRequest.prompt:find("Generation 1 Pokemon", 1, true) ~= nil
     and imageRequest.prompt:find("exactly four grayscale tones", 1, true) ~= nil
     and imageRequest.prompt:find("no antialiasing", 1, true) ~= nil
     and imageRequest.prompt:find("32%-by%-32 back sprite") ~= nil,
   "Cloudflare is prompted for classic Generation I monochrome pixel art")
+T.check(imageRequest.prompt:find("Pokemon Red and Blue", 1, true) ~= nil
+    and imageRequest.prompt:find("never as an ordinary real%-world animal") ~= nil
+    and imageRequest.prompt:find("oversized expressive head and eyes", 1, true) ~= nil
+    and imageRequest.prompt:find("avoid natural animal proportions", 1, true) ~= nil,
+  "image art direction favors stylized Generation I monsters over realistic animals")
 T.check(imageRequest.prompt:find("not modern full%-color concept art") ~= nil,
   "Cloudflare is explicitly steered away from modern full-color rendering")
+local oversizedImageDefinition = {
+  shape = string.rep("s", 100),
+  features = { string.rep("f", 100), string.rep("g", 100), string.rep("h", 100) },
+  bodyColors = { string.rep("c", 100), string.rep("d", 100), string.rep("e", 100) },
+  markings = string.rep("m", 500), pose = string.rep("p", 500),
+  texture = string.rep("t", 500), visualDescription = string.rep("v", 500),
+}
+local oversizedImageRequest = Json.decode(cloudflareClient.buildRequest(
+  oversizedImageDefinition, { mapId = "ROUTE_1", tileset = "OVERWORLD" }, seedA))
+T.check(#oversizedImageRequest.prompt <= ImageClient.MAX_PROMPT_LENGTH,
+  "Cloudflare prompts stay within the provider's 2,048-character limit")
+T.check(oversizedImageRequest.prompt:find("not modern full%-color concept art") ~= nil,
+  "bounded prompts retain the final rendering constraints")
 
 local fakePng = "\137PNG\r\n\26\nfixture"
 local encodedPng = love.data.encode("string", "base64", fakePng)

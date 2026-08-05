@@ -1,0 +1,26 @@
+return {
+  summary = "Generates persistent Gen 1-style Fakemon for maps with encounters or starters through NVIDIA NIM.",
+  author = "OpenAI Codex",
+  tags = { "ai", "fakemon", "nvidia-nim", "visual-genai", "procedural", "network" },
+  differences = {
+    changed = {
+      "wild, fishing, scripted, and gift Pokemon use a mix of new and previously discovered Fakemon",
+      "trainer party slots can use previously discovered Fakemon",
+      "unclaimed Oak's Lab starters use one of the lab's generated Fakemon",
+    },
+    added = {
+      "two save-specific Fakemon for each map with encounters or starters; empty maps make no requests",
+      "automatic persistence and restoration of generated definitions and sprites",
+    },
+    known = {
+      "requires NVIDIA_API_KEY, desktop curl, and network access",
+      "generation completes asynchronously and vanilla content remains in use until it finishes",
+      "AI output is validated and clamped, but designs can vary in quality",
+      "link play requires every participant to have identical generated save data",
+    },
+  },
+  credits = {
+    { who = "NVIDIA", for_ = "NIM hosted inference API" },
+  },
+  compat = { engine = ">=0.0.0-0 <2.0.0", modApi = 2 },
+}

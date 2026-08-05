@@ -1,0 +1,10 @@
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
+# Generated test and runtime output
+*.log
+*.tmp
+*.out
+coverage/

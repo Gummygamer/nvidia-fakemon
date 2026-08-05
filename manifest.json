@@ -1,0 +1,17 @@
+{
+  "id": "nvidia_fakemon",
+  "name": "NVIDIA Living Fakedex",
+  "version": "1.2.0",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "overhaul",
+  "category": "CONTENT",
+  "game_version": ">=0.0.0-0 <2.0.0",
+  "priority": 120,
+  "dependencies": [],
+  "optional_dependencies": [],
+  "conflicts": [],
+  "permissions": ["network", "filesystem", "engine_internals"],
+  "affects_link": true,
+  "description": "Builds a persistent, save-specific Fakedex with NVIDIA metadata and optional Cloudflare Workers AI art."
+}

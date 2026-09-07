@@ -11,8 +11,27 @@ progression. Maps without encounters do not spend generation requests.
 Source art is configured independently. Cloudflare Workers AI is explicitly
 prompted for classic first-generation monochrome handheld pixel art and can
 generate one consistent front/rear reference sheet with hosted FLUX.1 Schnell.
+The current Cloudflare FLUX REST schema accepts only the prompt and step count
+used here, so Cloudflare generation is not guaranteed to be repeatable across
+requests; the locally derived intended seed is retained in provenance but is
+not transmitted. The legacy Visual NIM provider continues to send its seed.
 The worker removes its edge-connected near-white background, crops and area-reduces both
 views into deterministic 112x112 indexed-color masters with coverage alpha.
+
+Segmentation tolerates an image model that does not honour "pure white". The
+backdrop radius is tried at the configured value first and only widened (to
+1.6x, then 2.2x of it, capped at 0.6) once that fails, so a clean sheet keeps
+its exact segmentation; without this, an off-white or textured backdrop left
+the border flood fill with nowhere to start and the whole view was rejected as
+`background removal left an unreasonable foreground area`. The divider between
+the views is the widest near-white column band within 25% of the centre rather
+than the centre itself, because a sheet that gives one view more room than the
+other otherwise cuts through a creature -- which segments cleanly and so no
+area guard can catch it. Near-ties resolve toward the centre, so a well-formed
+sheet keeps the cut it always had. Both paths are deterministic for identical
+source pixels, and a genuinely full-bleed design is still rejected and still
+falls back to procedural art, now with the measured foreground share in the
+diagnostic.
 Battles render those masters on a 2x backing canvas, while compatibility-size
 56x56 front and 32x32 back PNGs serve the remaining classic UI. Remote source
 artwork is never installed directly or stored in the save.
@@ -33,9 +52,13 @@ until a map's asynchronous requests complete.
 ## Setup
 
 Set `NVIDIA_API_KEY` for the metadata request. The default metadata model is
-`meta/llama-3.1-8b-instruct`; override it with `NVIDIA_FAKEMON_MODEL`.
-`NVIDIA_NIM_BASE_URL` can point at a compatible hosted or self-hosted NIM and
-defaults to `https://integrate.api.nvidia.com/v1`.
+`minimaxai/minimax-m3`; override it with `NVIDIA_FAKEMON_MODEL`. Both earlier
+defaults are unusable: `meta/llama-3.1-8b-instruct` reached end of life on
+the hosted NIM API and answers `410 Gone`, while
+`mistralai/mistral-7b-instruct-v0.3` is still listed by `/v1/models` but
+answers `404 Function ... Not found for account`. `NVIDIA_NIM_BASE_URL` can
+point at a compatible hosted or self-hosted NIM and defaults to
+`https://integrate.api.nvidia.com/v1`.
 
 For Cloudflare source art, create a Workers AI API token and set:
 
@@ -91,8 +114,11 @@ pages before relying on a quota estimate.
 
 ## Persistence and fallback
 
-Final logical pixel rows, gameplay data, bounded image provider/model/seed/
-prompt metadata, and art provenance live in `save.modData.nvidia_fakemon`.
+Final logical pixel rows, gameplay data, bounded image provider/model/intended
+seed/prompt metadata, and art provenance live in
+`save.modData.nvidia_fakemon`. For Cloudflare rows, `imageSeed` records the
+deterministic seed the client derived for provenance and future compatibility;
+the current Cloudflare request does not transmit it.
 Rendered PNGs live in the LOVE save directory under `nvidia_fakemon/`.
 Choosing **NEW GAME** replaces the mod-data bucket and deletes those PNGs
 before the new Fakedex begins.

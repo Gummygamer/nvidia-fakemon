@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Recover source art that a stricter converter used to throw away. Image
+  models do not always honour "pure white": an off-white or subtly textured
+  backdrop sits outside the 0.22 segmentation radius, the border flood fill
+  never propagates, and the whole view was rejected as
+  `background removal left an unreasonable foreground area`, dropping a
+  perfectly good design to procedural art. The backdrop radius now widens in
+  steps (1.0x, then 1.6x, then 2.2x of the configured value, capped at 0.6)
+  but only after the configured radius has failed, so a clean sheet keeps the
+  exact segmentation it always had and no creature edge is eroded by a
+  looser default. Rejection diagnostics now report the measured foreground
+  share and the widest radius tried.
+- Divide the two-view sheet at its widest near-white column band instead of
+  always at the exact centre. A sheet that gives one view more room than the
+  other put the centred cut through a creature, which still segmented cleanly
+  and so no area guard could catch it. Candidate cuts stay within 25% of the
+  centre, near-ties resolve toward the centre so a well-formed sheet keeps the
+  cut it always had, and a silhouette touching the divider is deprioritized
+  rather than trusted. Both paths stay deterministic for identical source
+  pixels, and a genuinely full-bleed design is still rejected.
+- Bump `sprite_converter` to version 3. The version is persisted per species
+  as `imagePipelineVersion`; existing rows are not rewritten, and the pipeline
+  contract around it is unchanged.
+- Fix Cloudflare FLUX request construction by sending exactly `prompt` and
+  `steps`; the current Workers AI REST schema rejects `seed` with error 5006.
+  Cloudflare rows still retain the derived seed as intended-seed provenance,
+  but Cloudflare generation is no longer described as deterministic across
+  requests. Keep sending `seed` to the legacy Visual NIM image endpoint, whose
+  documented schema still accepts it.
+- Default `NVIDIA_FAKEMON_MODEL` to `minimaxai/minimax-m3` because both
+  earlier defaults fail at the hosted NVIDIA NIM API:
+  `meta/llama-3.1-8b-instruct` reached end of life and answers `410 Gone`,
+  while `mistralai/mistral-7b-instruct-v0.3` answers `404 Function ... Not
+  found for account`. Its context still fits the full Generation I move-ID
+  list in the creature prompt, that prompt's JSON object comes back directly
+  in `content`, and it answers inside the 90-second request budget.
 - Keep generated image prompts within Cloudflare Workers AI's 2,048-character
   limit, including definitions whose visual fields reach their maximum sizes.
 - Generate and validate species-specific level-1 moves and level-up learnsets,
@@ -26,7 +61,7 @@
 - Keep legacy monochrome image rows and procedural saves loadable without
   rewriting their art.
 - Add Cloudflare Workers AI as the preferred online source-art provider, using
-  hosted FLUX.1 Schnell with a deterministic two-view source sheet.
+  hosted FLUX.1 Schnell with a coherent two-view source sheet.
 - Separate Cloudflare account/token configuration from the NVIDIA key used for
   creature metadata, and validate Cloudflare account/model endpoint inputs.
 - Select Cloudflare automatically only when both credentials exist; require an

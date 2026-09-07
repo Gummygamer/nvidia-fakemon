@@ -29,6 +29,12 @@ local request = Json.decode(Client.buildRequest({
 }))
 T.check(type(request) == "table", "generation request is valid JSON")
 T.eq(request.model, Client.DEFAULT_MODEL, "default NIM model is selected")
+T.eq(Client.DEFAULT_MODEL, "minimaxai/minimax-m3",
+  "default model is an instruct model the hosted NIM still serves")
+T.check(Client.DEFAULT_MODEL ~= "meta/llama-3.1-8b-instruct",
+  "default model is not the retired Llama 3.1 8B that answers 410 Gone")
+T.check(Client.DEFAULT_MODEL ~= "mistralai/mistral-7b-instruct-v0.3",
+  "default model is not the Mistral 7B whose function answers 404 Not found")
 T.eq(request.stream, false, "generation uses a complete non-streamed response")
 T.check(request.messages[2].content:find("ROUTE_1", 1, true) ~= nil,
   "map identity grounds the creature design")
@@ -96,7 +102,11 @@ local imageRequest = Json.decode(cloudflareClient.buildRequest(imageDefinition,
   { mapId = "ROUTE_1", tileset = "OVERWORLD" }, seedA))
 T.eq(imageRequest.model, nil, "Cloudflare model lives in the validated endpoint, not the JSON body")
 T.eq(imageRequest.steps, 8, "FLUX request steps are clamped to the model maximum")
-T.eq(imageRequest.seed, seedA, "image request carries the deterministic seed")
+local cloudflareRequestKeys = {}
+for key in pairs(imageRequest) do cloudflareRequestKeys[#cloudflareRequestKeys + 1] = key end
+table.sort(cloudflareRequestKeys)
+T.same(cloudflareRequestKeys, { "prompt", "steps" },
+  "Cloudflare FLUX request body contains exactly the accepted keys")
 T.check(imageRequest.prompt:find("left half", 1, true) ~= nil
   and imageRequest.prompt:find("right half", 1, true) ~= nil,
   "one source sheet requests consistent front and rear views")
@@ -112,6 +122,15 @@ T.check(imageRequest.prompt:find("Pokemon Red and Blue", 1, true) ~= nil
   "image art direction favors stylized Generation I monsters over realistic animals")
 T.check(imageRequest.prompt:find("not modern full%-color concept art") ~= nil,
   "Cloudflare is explicitly steered away from modern full-color rendering")
+local nimRequest = Json.decode(nimImageClient.buildRequest(imageDefinition,
+  { mapId = "ROUTE_1", tileset = "OVERWORLD" }, seedA))
+T.eq(nimRequest.seed, seedA, "Visual NIM requests retain their deterministic seed")
+local nimRequestKeys = {}
+for key in pairs(nimRequest) do nimRequestKeys[#nimRequestKeys + 1] = key end
+table.sort(nimRequestKeys)
+T.same(nimRequestKeys,
+  { "model", "n", "prompt", "response_format", "seed", "size" },
+  "Visual NIM request body retains its documented seed-capable key set")
 local oversizedImageDefinition = {
   shape = string.rep("s", 100),
   features = { string.rep("f", 100), string.rep("g", 100), string.rep("h", 100) },
@@ -277,6 +296,120 @@ local minX, _, maxX = rowBounds(converted.front)
 T.check(math.abs((minX - 1) - (112 - maxX)) <= 3,
   "aspect-preserved front reduction is centered on its logical canvas")
 
+-- ---------------------------------------------------------------------------
+-- Backdrop and gutter tolerance.  FLUX does not always honour "pure white",
+-- and a sheet that gives one view more room than the other puts the centred
+-- cut through the creature.  Both used to reject the whole sheet and drop a
+-- perfectly good design to procedural art ("background removal left an
+-- unreasonable foreground area").
+-- ---------------------------------------------------------------------------
+
+-- A light-grey backdrop sits outside the 0.22 default radius, so the border
+-- flood fill never propagates and every pixel counts as foreground.
+local GREY = 0.86
+local function greyImage(backdrop)
+  local image = {}
+  function image:getDimensions() return 160, 96 end
+  function image:getPixel(x, y)
+    local panelX = x < 80 and x or x - 80
+    local centerX = 40
+    local rx = x < 80 and 14 or 12
+    local ry = x < 80 and 37 or 34
+    local dx, dy = (panelX - centerX) / rx, (y - 48) / ry
+    if dx * dx + dy * dy <= 1 then
+      if math.abs(panelX - centerX) <= 5 and math.abs(y - 48) <= 8 then
+        return 1, 1, 1, 1
+      end
+      return x < 80 and 0.15 or 0.28, 0.45, 0.72, 1
+    end
+    return backdrop, backdrop, backdrop, 1
+  end
+  return image
+end
+
+local greyConverted, greyErr = SpriteConverter.convertImage(greyImage(GREY))
+T.eq(greyErr, nil, "a light-grey backdrop segments instead of rejecting the sheet ("
+  .. tostring(greyErr) .. ")")
+T.check(SpriteGenerator.validImageRows(greyConverted and greyConverted.front, 112, 112),
+  "grey-backdrop front view reaches a 112x112 master")
+T.check(SpriteGenerator.validImageRows(greyConverted and greyConverted.back, 112, 112),
+  "grey-backdrop back view reaches a 112x112 master")
+T.check(greyConverted
+  and table.concat(greyConverted.front):find("d8", 1, true) ~= nil,
+  "the widened radius still leaves an enclosed white marking as creature ink")
+T.same(SpriteConverter.convertImage(greyImage(GREY)), greyConverted,
+  "backdrop widening stays deterministic for identical source pixels")
+
+-- The default radius must still be the one used on a clean sheet: widening is
+-- a recovery path, not a new default that erodes dark creature edges.  The
+-- ladder is read through a local so a converter without one reports a failed
+-- check instead of aborting the rest of the suite.
+local ladder = SpriteConverter.BACKGROUND_THRESHOLD_LADDER
+T.eq(type(ladder) == "table" and ladder[1], 1.0,
+  "the configured backdrop radius is always attempted first")
+T.check(type(ladder) == "table" and #ladder > 1,
+  "recovery has wider backdrop radii available after the configured one fails")
+
+-- One sheet, two views that are not equally wide: the front creature sits in
+-- the left quarter and the rear one in the right three-quarters.  The centred
+-- cut lands on the rear creature; the only clean divider is off-centre.
+local function offCentreImage()
+  local image = {}
+  function image:getDimensions() return 256, 128 end
+  function image:getPixel(x, y)
+    local frontDx, frontDy = (x - 64) / 20, (y - 64) / 40
+    if frontDx * frontDx + frontDy * frontDy <= 1 then
+      return 0.15, 0.45, 0.72, 1
+    end
+    local backDx, backDy = (x - 192) / 44, (y - 64) / 50
+    if backDx * backDx + backDy * backDy <= 1 then
+      if math.abs(x - 192) <= 5 and math.abs(y - 64) <= 8 then
+        return 1, 1, 1, 1
+      end
+      return 0.28, 0.45, 0.72, 1
+    end
+    return GREY, GREY, GREY, 1
+  end
+  return image
+end
+
+local offCentreConverted, offCentreErr = SpriteConverter.convertImage(offCentreImage())
+T.eq(offCentreErr, nil, "an off-centre gutter is found instead of slicing a creature ("
+  .. tostring(offCentreErr) .. ")")
+-- A regression here must report a failed check, not abort the suite: every
+-- dereference is guarded so the remaining assertions still run.  A whole view
+-- keeps ink away from both canvas edges; a sliced one is flush against the cut.
+local function wholeView(rows)
+  if not rows then return false end
+  local minX, _, maxX = rowBounds(rows)
+  return minX > 1 and maxX < 112
+end
+T.check(wholeView(offCentreConverted and offCentreConverted.front),
+  "the searched divider leaves the front view whole rather than cut in half")
+T.check(wholeView(offCentreConverted and offCentreConverted.back),
+  "the searched divider leaves the back view whole rather than cut in half")
+T.check(offCentreConverted
+  and table.concat(offCentreConverted.front):find("00", 1, true) ~= nil,
+  "a searched divider still yields a transparent backdrop")
+T.same(SpriteConverter.convertImage(offCentreImage()), offCentreConverted,
+  "divider search is deterministic for identical source pixels")
+
+-- A full-bleed design is still correctly rejected: every rung fails, so the
+-- fallback stands.  What changed is that the diagnostic reports the measured
+-- foreground share instead of an unexplained rejection.
+local function fullBleedImage()
+  local image = {}
+  function image:getDimensions() return 160, 96 end
+  function image:getPixel() return 0.1, 0.2, 0.3, 1 end
+  return image
+end
+local fullBleed, fullBleedErr = SpriteConverter.convertImage(fullBleedImage())
+T.eq(fullBleed, nil, "a full-bleed sheet is still rejected rather than converted")
+T.check(fullBleedErr:find("foreground", 1, true) ~= nil,
+  "a rejected sheet names the silhouette problem")
+T.check(fullBleedErr:find("%%") ~= nil,
+  "a rejected sheet reports the measured foreground share for triage")
+
 local front, back = {}, {}
 for _ = 1, 28 do front[#front + 1] = string.rep("03", 14) end
 for _ = 1, 16 do back[#back + 1] = string.rep("12", 8) end
@@ -415,6 +548,15 @@ local rateLimited = assert(Pipeline.fromCompletion(completion,
   { imageClient = rateLimitClient, converter = fakeConverter }))
 T.eq(rateLimited.definition.imageFallbackTransient, true,
   "rate-limit and temporary-quota fallback is classified as transient")
+local badInputClient = {}
+for key, value in pairs(fakeImageClient) do badInputClient[key] = value end
+badInputClient.perform = function() return nil,
+  "Cloudflare 5006: AiError: Bad input: additional property '/seed'" end
+local badInputFallback = assert(Pipeline.fromCompletion(completion,
+  { mapId = "ROUTE_1", tileset = "OVERWORLD" }, "test",
+  { imageClient = badInputClient, converter = fakeConverter }))
+T.eq(badInputFallback.definition.imageFallbackTransient, nil,
+  "Cloudflare 5006 schema errors remain permanent rather than retryable")
 local timeoutClient = {}
 for key, value in pairs(fakeImageClient) do timeoutClient[key] = value end
 timeoutClient.perform = function() return nil, "network request timed out" end

@@ -2,8 +2,22 @@ local SpriteGenerator = require("mods.nvidia_fakemon.sprite_generator")
 
 local Converter = {}
 
-Converter.VERSION = 2
+Converter.VERSION = 3
 Converter.DEFAULT_BACKGROUND_THRESHOLD = 0.22
+-- An image model does not always honour "pure white".  A light-grey or subtly
+-- textured backdrop sits outside the default radius, the border flood fill
+-- never propagates, and the whole view is rejected as foreground -- which is
+-- what the "unreasonable foreground area" procedural fallback reports.  These
+-- factors widen the radius, but only after the configured one has failed, so a
+-- clean sheet keeps the tight segmentation it always had.
+Converter.BACKGROUND_THRESHOLD_LADDER = { 1.0, 1.6, 2.2 }
+Converter.MAX_BACKGROUND_THRESHOLD = 0.6
+Converter.MIN_VIEW_WIDTH = 32
+-- How far from the centre the two views may actually be divided.  A sheet that
+-- gives the front view more room than the rear puts the centred cut through
+-- the creature instead of through the gutter beside it.
+Converter.SPLIT_SEARCH_FRACTION = 0.25
+Converter.SPLIT_WINDOW = 3
 Converter.MAX_SOURCE_DIMENSION = 2048
 Converter.ART_FORMAT = "rgb216a27-v1"
 Converter.FRONT_WIDTH = 112
@@ -99,8 +113,13 @@ local function segment(image, region, threshold)
       foreground = foreground + 1
     end
   end
-  if foreground < total * 0.002 then return nil, "no usable creature silhouette was found" end
-  if foreground > total * 0.92 then return nil, "background removal left an unreasonable foreground area" end
+  if foreground < total * 0.002 then
+    return nil, "no usable creature silhouette was found", foreground / total
+  end
+  if foreground > total * 0.92 then
+    return nil, "background removal left an unreasonable foreground area",
+      foreground / total
+  end
 
   return {
     background = background, region = region,
@@ -206,19 +225,130 @@ local function quantize(image, segmented, outWidth, outHeight, opts)
   return rows
 end
 
-function Converter.convertImage(image, opts)
-  opts = opts or {}
-  local width, height, dimErr = dimensions(image)
-  if not width then return nil, dimErr end
-  local split = math.floor(width / 2)
-  if split < 32 or width - split < 32 then return nil, "two-view image is too narrow" end
-  local threshold = tonumber(opts.backgroundThreshold) or Converter.DEFAULT_BACKGROUND_THRESHOLD
-  threshold = math.max(0.03, math.min(0.6, threshold))
-  local frontMask, frontErr = segment(image, { x = 0, y = 0, width = split, height = height }, threshold)
+-- Background radii tried for one view, widest last.  The configured value is
+-- always first, so a sheet that segments cleanly never sees a wider radius.
+local function thresholdLadder(base)
+  local out, seen = {}, {}
+  for _, factor in ipairs(Converter.BACKGROUND_THRESHOLD_LADDER) do
+    local value = math.max(0.03,
+      math.min(Converter.MAX_BACKGROUND_THRESHOLD, base * factor))
+    -- collapse rungs that clamp onto each other at the configured ceiling
+    local key = math.floor(value * 1000 + 0.5)
+    if not seen[key] then
+      seen[key] = true
+      out[#out + 1] = value
+    end
+  end
+  return out
+end
+
+-- Segment one view, widening the backdrop radius until the flood fill leaves a
+-- plausible silhouette.  Deterministic: the ladder is a fixed function of the
+-- configured threshold and the first rung that succeeds wins, so converting
+-- the same source twice still produces the same rows.
+local function segmentView(image, region, baseThreshold)
+  local ladder = thresholdLadder(baseThreshold)
+  local lastErr, lastFraction = "background removal failed", nil
+  for _, threshold in ipairs(ladder) do
+    local mask, err, fraction = segment(image, region, threshold)
+    if mask then
+      mask.threshold = threshold
+      return mask
+    end
+    lastErr, lastFraction = err, fraction
+  end
+  local detail = ""
+  if lastFraction then
+    detail = (" (%d%% of the view stayed foreground at every threshold up to %.2f)")
+      :format(math.floor(lastFraction * 100 + 0.5), ladder[#ladder])
+  end
+  return nil, lastErr .. detail
+end
+
+-- Fraction of a narrow column band that reads as backdrop.  Rows are
+-- subsampled on tall sheets so scoring every candidate cut stays cheap next to
+-- the flood fill it is choosing a starting point for.
+local function backdropFraction(image, x, height, thresholdSquared)
+  local step = math.max(1, math.floor(height / 256))
+  local half = math.floor(Converter.SPLIT_WINDOW / 2)
+  local hits, samples = 0, 0
+  for column = x - half, x + half do
+    for y = 0, height - 1, step do
+      samples = samples + 1
+      local ok, r, g, b, a = pcall(image.getPixel, image, column, y)
+      if ok then
+        r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+        a = tonumber(a) or 1
+        if a < 0.5 then
+          hits = hits + 1
+        else
+          local dr, dg, db = 1 - r, 1 - g, 1 - b
+          if dr * dr + dg * dg + db * db <= thresholdSquared then
+            hits = hits + 1
+          end
+        end
+      end
+    end
+  end
+  return samples > 0 and hits / samples or 0
+end
+
+-- The divider between the views is the widest backdrop band nearest the
+-- centre.  Scoring a window rather than a single column keeps the cut out of
+-- the gutter's edge (where the creature on one side would still touch it), and
+-- resolving near-ties toward the centre means a well-formed sheet keeps
+-- exactly the cut it always had.
+local function bestSplit(image, width, height, thresholdSquared)
+  local centre = math.floor(width / 2)
+  local reach = math.floor(width * Converter.SPLIT_SEARCH_FRACTION)
+  local low = math.max(Converter.MIN_VIEW_WIDTH, centre - reach)
+  local high = math.min(width - Converter.MIN_VIEW_WIDTH, centre + reach)
+  if high <= low then return centre end
+  local step = math.max(1, math.floor((high - low) / 64))
+  local bestX, bestScore = centre, -1
+  for x = low, high, step do
+    local score = backdropFraction(image, x, height, thresholdSquared)
+    if score > bestScore + 0.02 then
+      bestX, bestScore = x, score
+    elseif score >= bestScore - 0.02
+        and math.abs(x - centre) < math.abs(bestX - centre) then
+      bestX, bestScore = x, math.max(score, bestScore)
+    end
+  end
+  return bestX
+end
+
+-- Cuts to try, most likely first.  The centred cut is the documented sheet
+-- layout; the searched cut is only appended when it differs enough to matter,
+-- so a well-formed sheet pays for a single attempt.
+local function splitCandidates(image, width, height, threshold)
+  local centre = math.floor(width / 2)
+  local candidates = { centre }
+  local searched = bestSplit(image, width, height, threshold * threshold)
+  if math.abs(searched - centre) >= 4
+      and searched >= Converter.MIN_VIEW_WIDTH
+      and width - searched >= Converter.MIN_VIEW_WIDTH then
+    candidates[#candidates + 1] = searched
+  end
+  return candidates
+end
+
+-- A silhouette that runs into the divider is being sliced in half, which still
+-- segments cleanly and so cannot be caught by the area guards alone.  The real
+-- gutter is elsewhere on the sheet, so report it and let the caller prefer
+-- another cut -- while keeping this one rather than losing the art outright.
+local function touchesDivider(frontMask, backMask)
+  return frontMask.maxX >= frontMask.region.width - 1 or backMask.minX <= 0
+end
+
+local function convertAt(image, split, width, height, threshold, opts)
+  local frontMask, frontErr = segmentView(image,
+    { x = 0, y = 0, width = split, height = height }, threshold)
   if not frontMask then return nil, "front view: " .. frontErr end
-  local backMask, backErr = segment(image,
+  local backMask, backErr = segmentView(image,
     { x = split, y = 0, width = width - split, height = height }, threshold)
   if not backMask then return nil, "back view: " .. backErr end
+  local sliced = touchesDivider(frontMask, backMask)
   local front, frontQuantizeErr = quantize(image, frontMask,
     Converter.FRONT_WIDTH, Converter.FRONT_HEIGHT, opts)
   if not front then return nil, "front view: " .. frontQuantizeErr end
@@ -233,7 +363,32 @@ function Converter.convertImage(image, opts)
     front = front, back = back, artFormat = Converter.ART_FORMAT,
     frontWidth = Converter.FRONT_WIDTH, frontHeight = Converter.FRONT_HEIGHT,
     backWidth = Converter.BACK_WIDTH, backHeight = Converter.BACK_HEIGHT,
-  }
+  }, nil, sliced
+end
+
+function Converter.convertImage(image, opts)
+  opts = opts or {}
+  local width, height, dimErr = dimensions(image)
+  if not width then return nil, dimErr end
+  if width < Converter.MIN_VIEW_WIDTH * 2 then
+    return nil, "two-view image is too narrow"
+  end
+  local threshold = tonumber(opts.backgroundThreshold)
+    or Converter.DEFAULT_BACKGROUND_THRESHOLD
+  threshold = math.max(0.03,
+    math.min(Converter.MAX_BACKGROUND_THRESHOLD, threshold))
+  local slicedRows, lastErr
+  for _, split in ipairs(splitCandidates(image, width, height, threshold)) do
+    local rows, err, sliced = convertAt(image, split, width, height, threshold, opts)
+    if rows then
+      if not sliced then return rows end
+      slicedRows = slicedRows or rows
+    else
+      lastErr = err
+    end
+  end
+  if slicedRows then return slicedRows end
+  return nil, lastErr or "two-view image is too narrow"
 end
 
 function Converter.decodeImage(bytes, extension)

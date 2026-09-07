@@ -21,7 +21,7 @@ local function isTransient(reason)
     or reason:find("rate limit", 1, true) ~= nil
     or reason:find("quota", 1, true) ~= nil
     or reason:find("429", 1, true) ~= nil
-    or reason:find("5%d%d") ~= nil
+    or reason:find("%f[%D]5%d%d%f[%D]") ~= nil
 end
 
 local function fallback(definition, reason, imageClient)

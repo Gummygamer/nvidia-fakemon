@@ -209,16 +209,16 @@ PROVIDERS.cloudflare = {
     return cloudflareEndpoint(readConfig(config, "CLOUDFLARE_ACCOUNT_ID", "accountId"),
       PROVIDERS.cloudflare.model(config))
   end,
-  buildRequest = function(config, definition, context, seed)
+  buildRequest = function(config, definition, context, _seed)
     local model = PROVIDERS.cloudflare.model(config)
     local capability = CLOUDFLARE_MODELS[model]
     if not capability then return nil, "unsupported Cloudflare image model" end
     local configuredSteps = tonumber(readConfig(config, "NVIDIA_FAKEMON_IMAGE_STEPS", "steps"))
     local steps = math.floor(configuredSteps or capability.defaultSteps)
     steps = math.max(capability.minSteps, math.min(capability.maxSteps, steps))
-    seed = tonumber(seed) or ImageClient.seed(definition, context)
-    seed = math.max(0, math.min(2147483647, math.floor(seed)))
-    return Json.encode({ prompt = ImageClient.prompt(definition), steps = steps, seed = seed })
+    -- The current Workers AI REST schema rejects FLUX seed with error 5006.
+    -- Keep the derived seed in save provenance, but do not send it here.
+    return Json.encode({ prompt = ImageClient.prompt(definition), steps = steps })
   end,
   perform = function(config, requestBody, tag)
     local token = readConfig(config, "CLOUDFLARE_API_TOKEN", "cloudflareToken")

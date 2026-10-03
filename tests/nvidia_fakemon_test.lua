@@ -29,7 +29,7 @@ local request = Json.decode(Client.buildRequest({
 }))
 T.check(type(request) == "table", "generation request is valid JSON")
 T.eq(request.model, Client.DEFAULT_MODEL, "default NIM model is selected")
-T.eq(Client.DEFAULT_MODEL, "minimaxai/minimax-m3",
+T.eq(Client.DEFAULT_MODEL, "google/gemma-4-31b-it",
   "default model is an instruct model the hosted NIM still serves")
 T.check(Client.DEFAULT_MODEL ~= "meta/llama-3.1-8b-instruct",
   "default model is not the retired Llama 3.1 8B that answers 410 Gone")

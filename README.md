@@ -52,11 +52,10 @@ until a map's asynchronous requests complete.
 ## Setup
 
 Set `NVIDIA_API_KEY` for the metadata request. The default metadata model is
-`minimaxai/minimax-m3`; override it with `NVIDIA_FAKEMON_MODEL`. Both earlier
-defaults are unusable: `meta/llama-3.1-8b-instruct` reached end of life on
-the hosted NIM API and answers `410 Gone`, while
-`mistralai/mistral-7b-instruct-v0.3` is still listed by `/v1/models` but
-answers `404 Function ... Not found for account`. `NVIDIA_NIM_BASE_URL` can
+`google/gemma-4-31b-it`; override it with `NVIDIA_FAKEMON_MODEL`. Earlier
+defaults are unusable: `meta/llama-3.1-8b-instruct` answers `410 Gone`,
+`mistralai/mistral-7b-instruct-v0.3` answers `404 Function ... Not found for
+account`, and `minimaxai/minimax-m3` reached end of life on 2026-09-09. `NVIDIA_NIM_BASE_URL` can
 point at a compatible hosted or self-hosted NIM and defaults to
 `https://integrate.api.nvidia.com/v1`.
 

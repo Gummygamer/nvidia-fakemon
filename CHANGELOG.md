@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Default `NVIDIA_FAKEMON_MODEL` to `google/gemma-4-31b-it`;
+  `minimaxai/minimax-m3` reached end of life on 2026-09-09 and every
+  generation request failed. Checked against the live API with the full
+  creature prompt: valid JSON in about 17s, inside the 90s budget.
+
 - FireRed and LeafGreen support (`"games": ["gen1", "frlg"]`). The 256 Fakedex
   slots become species 413..668 (FireRed's table ends at 411 and 412 is the
   egg). Generated creatures are written into the live species rows with the

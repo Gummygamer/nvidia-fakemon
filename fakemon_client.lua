@@ -13,7 +13,11 @@ Client.DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 -- account. minimaxai/minimax-m3 does serve the creature prompt: its context
 -- still fits the full Generation I move-ID list, the JSON object comes back
 -- directly in content, and it answers inside the 90s request budget.
-Client.DEFAULT_MODEL = "minimaxai/minimax-m3"
+-- minimaxai/minimax-m3 reached end of life on 2026-09-09. openai/gpt-oss-20b
+-- is served but reasons before it answers and returned no content inside this
+-- request's token budget. google/gemma-4-31b-it returns the creature JSON
+-- directly in content and fits the full Generation I move-ID list.
+Client.DEFAULT_MODEL = "google/gemma-4-31b-it"
 
 local VALID_TYPES = {
   NORMAL = true, FIGHTING = true, FLYING = true, POISON = true,

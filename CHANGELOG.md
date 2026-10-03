@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- FireRed and LeafGreen support (`"games": ["gen1", "frlg"]`). The 256 Fakedex
+  slots become species 413..668 (FireRed's table ends at 411 and 412 is the
+  egg). Generated creatures are written into the live species rows with the
+  engine's own record writer, get 64x64 battle art through `pokemon.sprite`
+  and a 32x32 icon, and replace wild encounters (`encounter.species`) and
+  about a third of trainer party slots. Gen 3 gifts and scripted wilds stay
+  vanilla because story scripts match species by number.
+
 - Recover source art that a stricter converter used to throw away. Image
   models do not always honour "pure white": an off-white or subtly textured
   backdrop sits outside the 0.22 segmentation radius, the border flood fill

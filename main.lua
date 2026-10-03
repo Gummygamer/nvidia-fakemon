@@ -3,6 +3,8 @@ local Json = require("src.link.Json")
 local SpriteGenerator = require("mods.nvidia_fakemon.sprite_generator")
 local SpriteWriter = require("mods.nvidia_fakemon.sprite_writer")
 local Learnset = require("mods.nvidia_fakemon.learnset")
+local Gen3 = require("mods.nvidia_fakemon.gen3")
+local GameVersion = require("src.core.GameVersion")
 
 local MAX_FAKEMON = 256
 local DEX_OFFSET = 151
@@ -40,15 +42,25 @@ end
 
 return function(mod)
   Client.cleanupStagedFiles()
+  local GEN3 = GameVersion.generation() == 3
   local vanillaFront = mod.path .. "/assets/fallback_front.png"
   local vanillaBack = mod.path .. "/assets/fallback_back.png"
   for index = 1, MAX_FAKEMON do
     local id = slotId(index)
-    mod.content.pokemon:register(id, placeholder(index, vanillaFront, vanillaBack))
-    mod.content.icons:register(id, "MON")
+    if GEN3 then
+      -- FireRed / LeafGreen: numbered species rows, no icon or constants
+      -- registries (see gen3.lua).
+      mod.content.pokemon:register(id,
+        Gen3.placeholder(id, Gen3.index(index), vanillaFront, vanillaBack))
+    else
+      mod.content.pokemon:register(id, placeholder(index, vanillaFront, vanillaBack))
+      mod.content.icons:register(id, "MON")
+    end
   end
-  mod.content.constants:patch("dexSize", DEX_OFFSET + MAX_FAKEMON)
-  mod.content.constants:patch("dexDigits", 3)
+  if not GEN3 then
+    mod.content.constants:patch("dexSize", DEX_OFFSET + MAX_FAKEMON)
+    mod.content.constants:patch("dexDigits", 3)
+  end
 
   mod.options:define({
     { key = "enabled", label = "AI FAKEMON", type = "toggle", default = true },
@@ -95,6 +107,7 @@ return function(mod)
   end
 
   local function eligibleMap(mapId)
+    if GEN3 then return Gen3.eligible(mapId) end
     if not mapId or not (game and game.data) then return false end
     if STARTER_MAPS[mapId] then return true end
     if encounterTableHasSlots(game.data.encounters and game.data.encounters[mapId]) then
@@ -148,7 +161,12 @@ return function(mod)
 
   local function forbiddenNames(saved)
     local names = {}
-    for id, definition in pairs(game and game.data and game.data.pokemon or {}) do
+    if GEN3 then
+      for _, name in ipairs(Gen3.vanillaNames(game)) do
+        names[name:upper():gsub("[^A-Z]", "")] = true
+      end
+    end
+    for id, definition in pairs(not GEN3 and game and game.data and game.data.pokemon or {}) do
       if not tostring(id):match("^NVIDIA_FAKE_") and type(definition) == "table"
           and type(definition.name) == "string" and definition.name ~= "" then
         names[definition.name:upper():gsub("[^A-Z]", "")] = true
@@ -229,7 +247,46 @@ return function(mod)
     return out
   end
 
+  -- FireRed / LeafGreen: write the generated creature into the live species
+  -- rows and give it art at the 64x64 size Gen 3 pictures use.
+  local gen3Fronts = {}
+  local function applyDefinitionGen3(targetGame, slot, definition, forceArt)
+    if type(definition) ~= "table" then return nil end
+    local repairedArt = SpriteGenerator.ensure(definition)
+    local front, back, artErr = SpriteWriter.ensureGen3(slot, definition,
+      forceArt or repairedArt)
+    if not front then
+      mod.log:warn("could not restore " .. slot .. " sprites: " .. tostring(artErr)
+        .. " -- verify the save directory is writable")
+      return nil
+    end
+    local index = tonumber(slot:match("(%d+)$")) or 1
+    local types = engineTypes(definition.types)
+    for i, id in ipairs(types) do
+      if id == "PSYCHIC_TYPE" then types[i] = "PSYCHIC" end
+    end
+    local startMoves, learnedMoves = Learnset.resolve(definition,
+      { moves = setmetatable({}, { __index = function() return true end }) }, types)
+    local record = Gen3.placeholder(slot, Gen3.index(index), front, back)
+    record.name = (definition.name or record.name):upper()
+    record.types = types
+    record.baseStats = Gen3.baseStats(definition.baseStats or {})
+    record.catchRate, record.baseExp = definition.catchRate, definition.baseExp
+    record.learnset = Gen3.learnset(startMoves, learnedMoves,
+      Gen3.moveChecker(targetGame))
+    local ok, err = Gen3.write(targetGame, record)
+    if not ok then
+      mod.log:warn("could not write " .. slot .. " into the species table: "
+        .. tostring(err))
+      return nil
+    end
+    gen3Fronts[slot] = { front = front, back = back }
+    Gen3.setIcon(record.index, front)
+    return true
+  end
+
   local function applyDefinition(targetGame, slot, definition, forceArt)
+    if GEN3 then return applyDefinitionGen3(targetGame, slot, definition, forceArt) end
     if not (targetGame and targetGame.data and targetGame.data.pokemon) then return nil end
     local def = targetGame.data.pokemon[slot]
     if not def or type(definition) ~= "table" then return nil end
@@ -271,13 +328,23 @@ return function(mod)
   local function restoreBucket(targetGame, bucket)
     local saved = bucket and bucket.state
     if type(saved) ~= "table" then return end
-    targetGame.data.constants.dexSize = DEX_OFFSET
+    if not GEN3 then targetGame.data.constants.dexSize = DEX_OFFSET end
     for slot, definition in pairs(saved.fakemon or {}) do
       applyDefinition(targetGame, slot, definition, false)
     end
   end
 
   local function resetRuntimeSlots()
+    if GEN3 then
+      for index = 1, MAX_FAKEMON do
+        local id = slotId(index)
+        Gen3.clearIcon(Gen3.index(index))
+        Gen3.write(game, Gen3.placeholder(id, Gen3.index(index),
+          vanillaFront, vanillaBack))
+      end
+      gen3Fronts = {}
+      return
+    end
     if not (game and game.data) then return end
     for index = 1, MAX_FAKEMON do
       local id = slotId(index)
@@ -384,12 +451,13 @@ return function(mod)
     saved.fakemon[slot] = definition
     saved.order[#saved.order + 1] = { mapId = active.job.mapId, species = slot }
     mod.save:set("state", saved)
-    require("src.render.Assets").invalidate()
+    pcall(function() require("src.render.Assets").invalidate() end)
     mod.log:info(("added %s as Fakedex No.%03d for %s (art: %s)")
       :format(definition.name, DEX_OFFSET + index, active.job.mapId,
         tostring(definition.artSource or "unknown")))
-    if game and game.writeSave then
-      local ok, wrote = pcall(game.writeSave, game)
+    local saveFn = game and (game.writeSave or game.saveGame)
+    if saveFn then
+      local ok, wrote = pcall(saveFn, game)
       if not ok or wrote == false then
         mod.log:warn("generated Fakemon is in memory but autosave failed -- save manually before quitting")
       end
@@ -413,6 +481,7 @@ return function(mod)
 
   mod.events:on("game.ready", function(ev)
     game = ev.game
+    if GEN3 then return end
     game.data.constants.dexSize = DEX_OFFSET
     game.data.text._NVIDIA_FAKEMON_EMPTY = "Data not generated."
   end)
@@ -435,6 +504,7 @@ return function(mod)
   end)
 
   mod.events:on("map.entered", function(ev)
+    if GEN3 then Gen3.reseedIcons() end
     enqueue(ev.mapId, ev.map)
   end)
 
@@ -446,8 +516,24 @@ return function(mod)
   -- Normal UI consumers keep the compatibility-size 56x56/32x32 PNGs.
   -- Battles run on a 2x backing canvas and resolve the high-resolution PNGs
   -- here, so source detail survives the classic logical coordinate system.
+  -- FireRed / LeafGreen resolve every picture through this hook too, with the
+  -- species number in ctx.gen3Species, and take 64x64 art from a path.
+  local function slotOfGen3(number)
+    number = tonumber(number)
+    if not number then return nil end
+    local index = number - Gen3.INDEX_BASE
+    if index < 1 or index > MAX_FAKEMON then return nil end
+    return slotId(index)
+  end
+
   mod.hooks:wrap("pokemon.sprite", function(next, path, ctx)
     local out = next(path, ctx)
+    if GEN3 then
+      local slot = out == path and ctx and slotOfGen3(ctx.gen3Species) or nil
+      local art = slot and gen3Fronts[slot]
+      if art then return ctx.side == "back" and art.back or art.front end
+      return out
+    end
     if out ~= path or not (ctx and ctx.kind == "battle" and ctx.species) then
       return out
     end
@@ -461,7 +547,16 @@ return function(mod)
     local out = next(encounter, ctx)
     local replacement = out and replacementFor(ctx and ctx.mapId,
       tostring(out.species) .. "|" .. tostring(out.level))
-    if replacement then out.species = replacement end
+    if replacement then
+      if GEN3 then
+        -- the engine reads a number here; a name would resolve through the
+        -- ROM's own name table, which a generated creature is not in
+        local number = Gen3.index(tonumber(replacement:match("(%d+)$")) or 1)
+        out.species, out.speciesId, out.moves = number, number, nil
+      else
+        out.species = replacement
+      end
+    end
     return out
   end)
 
@@ -486,7 +581,18 @@ return function(mod)
       -- Roughly one party slot in three becomes a Fakemon. This leaves each
       -- trainer's authored team recognizable while letting generated species
       -- appear even on maps that do not generate a local pair.
-      if stableHash(seed) % 3 == 0 then copy.species = chooseFrom(roster, seed) end
+      if stableHash(seed) % 3 == 0 then
+        local chosen = chooseFrom(roster, seed)
+        if GEN3 then
+          -- a number, and no ROM moveset: the engine derives one from the
+          -- generated learnset
+          local number = Gen3.index(tonumber(chosen:match("(%d+)$")) or 1)
+          copy.species, copy.speciesId = number, number
+          copy.moves, copy.moveIds = nil, nil
+        else
+          copy.species = chosen
+        end
+      end
       mapped[i] = copy
     end
     return mapped
@@ -496,7 +602,7 @@ return function(mod)
   -- both public script commands while the command registry is still open;
   -- static_battle calls the engine function directly, so it needs its own
   -- wrapper in addition to start_battle.
-  local vanillaStartBattle = mod.content.commands:get("start_battle")
+  local vanillaStartBattle = not GEN3 and mod.content.commands:get("start_battle")
   if vanillaStartBattle then
     mod.content.commands:override("start_battle", function(ctx, kind, a, b)
       if kind == "wild" then
@@ -507,7 +613,7 @@ return function(mod)
       return vanillaStartBattle(ctx, kind, a, b)
     end)
   end
-  local vanillaStaticBattle = mod.content.commands:get("static_battle")
+  local vanillaStaticBattle = not GEN3 and mod.content.commands:get("static_battle")
   if vanillaStaticBattle then
     mod.content.commands:override("static_battle", function(ctx, species, level, beatFlag)
       local map = ctx.overworld and ctx.overworld.map
@@ -517,7 +623,10 @@ return function(mod)
     end)
   end
 
+  -- Gen 3 gifts (starters, fossils, Lapras, Eevee) are matched by species in
+  -- the story scripts, so they stay vanilla there.
   mod.events:on("pokemon.before_give", function(gift)
+    if GEN3 then return end
     local ctx = gift.ctx
     local map = ctx and ctx.overworld and ctx.overworld.map
     if not map then return end

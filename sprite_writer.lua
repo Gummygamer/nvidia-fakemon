@@ -135,13 +135,82 @@ function SpriteWriter.ensure(slot, definition, force)
   return frontPath, backPath
 end
 
+-- FireRed / LeafGreen battle pictures are 64x64 and the engine centres, never
+-- scales, any other size, so this renders both views at exactly that size.
+-- The file name carries a hash of the art: the engine caches decoded images by
+-- path, and a slot that is regenerated (a new game) must not be served the
+-- previous creature's picture.
+local function artTag(definition)
+  local hash = 0
+  local function mix(value)
+    value = tostring(value or "")
+    for index = 1, #value do
+      hash = (hash * 131 + value:byte(index)) % 2147483647
+    end
+  end
+  mix(definition.name)
+  for _, row in ipairs(definition.front or {}) do mix(row) end
+  for _, row in ipairs(definition.back or {}) do mix(row) end
+  return ("%08x"):format(hash)
+end
+
+function SpriteWriter.gen3Paths(slot, definition)
+  local tag = artTag(definition)
+  return ("%s/%s_g3_%s_front.png"):format(SpriteWriter.ROOT, slot:lower(), tag),
+    ("%s/%s_g3_%s_back.png"):format(SpriteWriter.ROOT, slot:lower(), tag)
+end
+
+function SpriteWriter.ensureGen3(slot, definition, force)
+  local fs = love and love.filesystem
+  if not fs then return nil, nil, "sprite persistence needs LOVE filesystem" end
+  local frontPath, backPath = SpriteWriter.gen3Paths(slot, definition)
+  if force or not fs.getInfo(frontPath) then
+    local _, err
+    if SpriteWriter.isHighResolution(definition) then
+      _, err = drawColor(definition.front, tonumber(definition.frontWidth),
+        tonumber(definition.frontHeight), 64, 64, frontPath)
+    else
+      _, err = draw(definition.front, 28, 28, 2, frontPath)
+    end
+    if err then return nil, nil, err end
+  end
+  if force or not fs.getInfo(backPath) then
+    local _, err
+    if SpriteWriter.isHighResolution(definition) then
+      _, err = drawColor(definition.back, tonumber(definition.backWidth),
+        tonumber(definition.backHeight), 64, 64, backPath)
+    else
+      _, err = draw(definition.back, 16, 16, 4, backPath)
+    end
+    if err then return nil, nil, err end
+  end
+  return frontPath, backPath
+end
+
+-- A 32x32 party/box icon sampled from the front picture. Returns ImageData.
+function SpriteWriter.iconImageData(frontPath)
+  if not (love and love.image and love.image.newImageData) then return nil end
+  local ok, source = pcall(love.image.newImageData, frontPath)
+  if not ok or not source then return nil end
+  local sw, sh = source:getDimensions()
+  local icon = love.image.newImageData(32, 32)
+  for y = 0, 31 do
+    for x = 0, 31 do
+      icon:setPixel(x, y, source:getPixel(
+        math.min(sw - 1, math.floor((x + 0.5) * sw / 32)),
+        math.min(sh - 1, math.floor((y + 0.5) * sh / 32))))
+    end
+  end
+  return icon
+end
+
 function SpriteWriter.clear()
   local fs = love and love.filesystem
   if not (fs and fs.getDirectoryItems and fs.remove) then return end
   local ok, items = pcall(fs.getDirectoryItems, SpriteWriter.ROOT)
   if ok and type(items) == "table" then
     for _, name in ipairs(items) do
-      if name:match("^nvidia_fake_%d%d%d_[a-z_]+%.png$") then
+      if name:match("^nvidia_fake_%d%d%d_[%w_]+%.png$") then
         pcall(fs.remove, SpriteWriter.ROOT .. "/" .. name)
       end
     end

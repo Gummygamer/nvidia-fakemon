@@ -183,3 +183,17 @@ $env:NVIDIA_FAKEMON_LIVE_IMAGE_TEST = "1"
 ```
 
 The normal automated suite never makes an image request.
+
+
+## FireRed and LeafGreen
+
+The mod runs on Gen1Recomp Deluxe's FireRed and LeafGreen as well. Generation
+is identical (same NIM metadata, same art pipeline); only the engine wiring
+differs. Notes:
+
+- Slots use species numbers 413-668. Stats map Gen 1's single Special to both
+  Special Attack and Special Defense; creatures have no ability and cannot breed.
+- Wild encounters (grass, surf, rock smash) and trainer parties use the map pool;
+  gifts, fossils and scripted wild battles are left alone.
+- Generated creatures have no National Dex page.
+- Fakemon icons and 64x64 battle art are drawn from the same generated artwork.

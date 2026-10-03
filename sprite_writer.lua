@@ -92,6 +92,160 @@ local function drawColor(rows, sourceWidth, sourceHeight, outWidth, outHeight, o
   return outPath
 end
 
+-- ---------------------------------------------------------------------------
+-- Framing for the FireRed / LeafGreen pictures.
+--
+-- The stored 112x112 master was fitted to its frame by the size of the whole
+-- foreground, so one stray fleck far from the creature (a label, a spark, a
+-- stray line left by the image model) shrinks the creature and pushes it off
+-- centre -- and the source image that produced it is not kept, so it cannot be
+-- converted again.  This works from the master instead: it finds the pieces of
+-- ink, drops the specks, and fits what is left to the frame, so the creatures
+-- already in a save are framed the same way new ones are.
+-- ---------------------------------------------------------------------------
+
+SpriteWriter.FRAMING_VERSION = 1
+local SPECK_FRACTION = 0.04    -- of the main body's area
+local MERGE_GAP = 3            -- pieces this close are one creature
+
+local function decodeGrid(rows, width, height)
+  local R, G, B, A = {}, {}, {}, {}
+  for y = 0, height - 1 do
+    local row = tostring(rows[y + 1] or "")
+    for x = 0, width - 1 do
+      local r, g, b, a = decodeColor(row:sub(x * 2 + 1, x * 2 + 2))
+      local i = y * width + x + 1
+      R[i], G[i], B[i], A[i] = r, g, b, a
+    end
+  end
+  return R, G, B, A
+end
+
+-- Drop the pieces of ink that are not the creature: anything small and apart
+-- from the main body.  Returns the bounds of what is kept, or nil if nothing is.
+local function dropSpecks(A, width, height)
+  local label, pieces = {}, {}
+  for start = 1, width * height do
+    if A[start] > 0 and not label[start] then
+      local id = #pieces + 1
+      local queue, head, tail = { start }, 1, 1
+      label[start] = id
+      local piece = { id = id, area = 0, minX = width, minY = height, maxX = -1, maxY = -1 }
+      while head <= tail do
+        local index = queue[head]
+        head = head + 1
+        local x, y = (index - 1) % width, math.floor((index - 1) / width)
+        piece.area = piece.area + 1
+        if x < piece.minX then piece.minX = x end
+        if x > piece.maxX then piece.maxX = x end
+        if y < piece.minY then piece.minY = y end
+        if y > piece.maxY then piece.maxY = y end
+        for dy = -MERGE_GAP, MERGE_GAP do
+          local ny = y + dy
+          if ny >= 0 and ny < height then
+            for dx = -MERGE_GAP, MERGE_GAP do
+              local nx = x + dx
+              if nx >= 0 and nx < width then
+                local neighbour = ny * width + nx + 1
+                if A[neighbour] > 0 and not label[neighbour] then
+                  label[neighbour] = id
+                  tail = tail + 1
+                  queue[tail] = neighbour
+                end
+              end
+            end
+          end
+        end
+      end
+      pieces[id] = piece
+    end
+  end
+  if #pieces == 0 then return nil end
+  local main = pieces[1]
+  for _, piece in ipairs(pieces) do
+    if piece.area > main.area then main = piece end
+  end
+  local keep = {}
+  for _, piece in ipairs(pieces) do
+    keep[piece.id] = piece == main
+      or piece.area >= main.area * SPECK_FRACTION
+      or (piece.minX >= main.minX - 2 and piece.maxX <= main.maxX + 2
+        and piece.minY >= main.minY - 2 and piece.maxY <= main.maxY + 2)
+  end
+  local minX, minY, maxX, maxY = width, height, -1, -1
+  for index = 1, width * height do
+    local id = label[index]
+    if id and not keep[id] then
+      A[index] = 0
+    elseif id then
+      local x, y = (index - 1) % width, math.floor((index - 1) / width)
+      if x < minX then minX = x end
+      if x > maxX then maxX = x end
+      if y < minY then minY = y end
+      if y > maxY then maxY = y end
+    end
+  end
+  if maxX < 0 then return nil end
+  return minX, minY, maxX, maxY
+end
+
+-- Render a master into an outWidth x outHeight picture: specks removed, the
+-- creature scaled to fit with `pad` clear pixels all round and centred.
+local function drawFramed(rows, sourceWidth, sourceHeight, outWidth, outHeight, pad, outPath)
+  if not (love and love.image and love.image.newImageData and love.filesystem) then
+    return nil, "sprite rendering needs LOVE image and filesystem modules"
+  end
+  love.filesystem.createDirectory(SpriteWriter.ROOT)
+  local R, G, B, A = decodeGrid(rows, sourceWidth, sourceHeight)
+  local minX, minY, maxX, maxY = dropSpecks(A, sourceWidth, sourceHeight)
+  if not minX then return nil, "sprite art is empty" end
+  local boundWidth, boundHeight = maxX - minX + 1, maxY - minY + 1
+  local scale = math.min((outWidth - pad * 2) / boundWidth, (outHeight - pad * 2) / boundHeight)
+  local renderedWidth, renderedHeight = boundWidth * scale, boundHeight * scale
+  local startX, startY = (outWidth - renderedWidth) / 2, (outHeight - renderedHeight) / 2
+  local image = love.image.newImageData(outWidth, outHeight)
+  for y = 0, outHeight - 1 do
+    for x = 0, outWidth - 1 do
+      local dx0, dy0 = math.max(x, startX), math.max(y, startY)
+      local dx1 = math.min(x + 1, startX + renderedWidth)
+      local dy1 = math.min(y + 1, startY + renderedHeight)
+      local red, green, blue, ink, area = 0, 0, 0, 0, 0
+      if dx1 > dx0 and dy1 > dy0 then
+        local sx0, sy0 = minX + (dx0 - startX) / scale, minY + (dy0 - startY) / scale
+        local sx1, sy1 = minX + (dx1 - startX) / scale, minY + (dy1 - startY) / scale
+        area = (sx1 - sx0) * (sy1 - sy0)
+        for sy = math.floor(sy0), math.ceil(sy1) - 1 do
+          if sy >= 0 and sy < sourceHeight then
+            local overlapY = math.max(0, math.min(sy1, sy + 1) - math.max(sy0, sy))
+            for sx = math.floor(sx0), math.ceil(sx1) - 1 do
+              if sx >= 0 and sx < sourceWidth then
+                local overlapX = math.max(0, math.min(sx1, sx + 1) - math.max(sx0, sx))
+                local weight = overlapX * overlapY
+                local i = sy * sourceWidth + sx + 1
+                if weight > 0 and A[i] > 0 then
+                  ink = ink + weight
+                  red, green, blue = red + R[i] * weight, green + G[i] * weight,
+                    blue + B[i] * weight
+                end
+              end
+            end
+          end
+        end
+      end
+      local coverage = area > 0 and ink / area or 0
+      if coverage >= 0.3 then
+        image:setPixel(x, y, red / ink, green / ink, blue / ink,
+          coverage >= 0.6 and 1 or 0.5)
+      else
+        image:setPixel(x, y, 1, 1, 1, 0)
+      end
+    end
+  end
+  local ok, err = pcall(image.encode, image, "png", outPath)
+  if not ok then return nil, tostring(err) end
+  return outPath
+end
+
 function SpriteWriter.isHighResolution(definition)
   return type(definition) == "table" and definition.artFormat == "rgb216a27-v1"
     and tonumber(definition.frontWidth) and tonumber(definition.frontHeight)
@@ -149,6 +303,8 @@ local function artTag(definition)
     end
   end
   mix(definition.name)
+  -- a new framing must not be served the pictures an older one cached
+  mix("framing" .. SpriteWriter.FRAMING_VERSION)
   for _, row in ipairs(definition.front or {}) do mix(row) end
   for _, row in ipairs(definition.back or {}) do mix(row) end
   return ("%08x"):format(hash)
@@ -167,8 +323,8 @@ function SpriteWriter.ensureGen3(slot, definition, force)
   if force or not fs.getInfo(frontPath) then
     local _, err
     if SpriteWriter.isHighResolution(definition) then
-      _, err = drawColor(definition.front, tonumber(definition.frontWidth),
-        tonumber(definition.frontHeight), 64, 64, frontPath)
+      _, err = drawFramed(definition.front, tonumber(definition.frontWidth),
+        tonumber(definition.frontHeight), 64, 64, 3, frontPath)
     else
       _, err = draw(definition.front, 28, 28, 2, frontPath)
     end
@@ -177,8 +333,8 @@ function SpriteWriter.ensureGen3(slot, definition, force)
   if force or not fs.getInfo(backPath) then
     local _, err
     if SpriteWriter.isHighResolution(definition) then
-      _, err = drawColor(definition.back, tonumber(definition.backWidth),
-        tonumber(definition.backHeight), 64, 64, backPath)
+      _, err = drawFramed(definition.back, tonumber(definition.backWidth),
+        tonumber(definition.backHeight), 64, 64, 3, backPath)
     else
       _, err = draw(definition.back, 16, 16, 4, backPath)
     end

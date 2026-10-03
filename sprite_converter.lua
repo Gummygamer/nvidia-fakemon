@@ -2,7 +2,7 @@ local SpriteGenerator = require("mods.nvidia_fakemon.sprite_generator")
 
 local Converter = {}
 
-Converter.VERSION = 3
+Converter.VERSION = 4
 Converter.DEFAULT_BACKGROUND_THRESHOLD = 0.22
 -- An image model does not always honour "pure white".  A light-grey or subtly
 -- textured backdrop sits outside the default radius, the border flood fill
@@ -366,6 +366,209 @@ local function convertAt(image, split, width, height, threshold, opts)
   }, nil, sliced
 end
 
+-- ---------------------------------------------------------------------------
+-- Views by connected component.
+--
+-- Cutting the sheet at a column and calling the left piece the front view slices
+-- a creature that crosses it, and lets a stray fleck anywhere in the half
+-- (a label, a spark, a stray line) stretch the bounding box so the creature is
+-- scaled down and pushed off centre.  Instead the creatures are found where
+-- they are: the foreground is labelled into connected pieces, pieces that sit
+-- close together (a flame above a head, a tail tip) are one creature, specks
+-- are dropped, and the creature on the left is the front view and the one on the
+-- right is the back view, wherever the divider happens to fall.  A sheet this
+-- cannot make sense of falls through to the column cut below.
+-- ---------------------------------------------------------------------------
+
+Converter.MIN_PIECE_FRACTION = 0.04     -- of the largest creature's area
+Converter.MERGE_GAP_FRACTION = 0.02     -- of the shorter sheet side
+
+local function labelPieces(segmented)
+  local width, height = segmented.region.width, segmented.region.height
+  local total = width * height
+  local _, label = buffers(total)
+  local _, queue = buffers(total)
+  local pieces = {}
+  local next_ = 0
+  for start = 0, total - 1 do
+    if valueAt(segmented.background, start) == 0 and valueAt(label, start) == 0 then
+      next_ = next_ + 1
+      local id = next_
+      local head, tail = 0, 0
+      setValue(label, start, id)
+      setValue(queue, tail, start)
+      tail = tail + 1
+      local area, sumX = 0, 0
+      local minX, minY, maxX, maxY = width, height, -1, -1
+      while head < tail do
+        local index = valueAt(queue, head)
+        head = head + 1
+        local x, y = index % width, math.floor(index / width)
+        area = area + 1
+        sumX = sumX + x
+        if x < minX then minX = x end
+        if x > maxX then maxX = x end
+        if y < minY then minY = y end
+        if y > maxY then maxY = y end
+        for dy = -1, 1 do
+          local ny = y + dy
+          if ny >= 0 and ny < height then
+            for dx = -1, 1 do
+              local nx = x + dx
+              if (dx ~= 0 or dy ~= 0) and nx >= 0 and nx < width then
+                local neighbour = ny * width + nx
+                if valueAt(segmented.background, neighbour) == 0
+                    and valueAt(label, neighbour) == 0 then
+                  setValue(label, neighbour, id)
+                  setValue(queue, tail, neighbour)
+                  tail = tail + 1
+                end
+              end
+            end
+          end
+        end
+      end
+      pieces[id] = { id = id, area = area, sumX = sumX,
+        minX = minX, minY = minY, maxX = maxX, maxY = maxY }
+    end
+  end
+  return pieces, label
+end
+
+-- Join pieces whose bounding boxes lie within `gap` of each other.  Returns the
+-- merged groups largest first, each with the ids of the pieces it holds.
+local function groupPieces(pieces, gap, totalArea)
+  local list = {}
+  for _, piece in pairs(pieces) do
+    -- JPEG noise and one-pixel specks are not worth merging or weighing
+    if piece.area >= math.max(8, totalArea * 0.0002) then list[#list + 1] = piece end
+  end
+  table.sort(list, function(a, b)
+    if a.area ~= b.area then return a.area > b.area end
+    return a.id < b.id
+  end)
+  if #list > 96 then for i = #list, 97, -1 do list[i] = nil end end
+  local parent = {}
+  for i = 1, #list do parent[i] = i end
+  local function find(i)
+    while parent[i] ~= i do
+      parent[i] = parent[parent[i]]
+      i = parent[i]
+    end
+    return i
+  end
+  for i = 1, #list do
+    for j = i + 1, #list do
+      local a, b = list[i], list[j]
+      local dx = math.max(0, math.max(a.minX, b.minX) - math.min(a.maxX, b.maxX))
+      local dy = math.max(0, math.max(a.minY, b.minY) - math.min(a.maxY, b.maxY))
+      if dx <= gap and dy <= gap then
+        local ra, rb = find(i), find(j)
+        if ra ~= rb then parent[math.max(ra, rb)] = math.min(ra, rb) end
+      end
+    end
+  end
+  local groups, byRoot = {}, {}
+  for i, piece in ipairs(list) do
+    local root = find(i)
+    local group = byRoot[root]
+    if not group then
+      group = { ids = {}, area = 0, sumX = 0,
+        minX = piece.minX, minY = piece.minY, maxX = piece.maxX, maxY = piece.maxY }
+      byRoot[root] = group
+      groups[#groups + 1] = group
+    end
+    group.ids[piece.id] = true
+    group.area = group.area + piece.area
+    group.sumX = group.sumX + piece.sumX
+    group.minX, group.minY = math.min(group.minX, piece.minX), math.min(group.minY, piece.minY)
+    group.maxX, group.maxY = math.max(group.maxX, piece.maxX), math.max(group.maxY, piece.maxY)
+  end
+  for _, group in ipairs(groups) do group.centreX = group.sumX / group.area end
+  table.sort(groups, function(a, b)
+    if a.area ~= b.area then return a.area > b.area end
+    return a.centreX < b.centreX
+  end)
+  return groups
+end
+
+-- The mask of one view, in the shape quantize() reads: a region round the
+-- creature's groups, with everything that is not one of them marked background.
+local function viewMask(segmented, label, members, opts)
+  local minX, minY, maxX, maxY = math.huge, math.huge, -1, -1
+  local ids = {}
+  for _, group in ipairs(members) do
+    for id in pairs(group.ids) do ids[id] = true end
+    minX, minY = math.min(minX, group.minX), math.min(minY, group.minY)
+    maxX, maxY = math.max(maxX, group.maxX), math.max(maxY, group.maxY)
+  end
+  local margin = math.max(1, math.ceil(math.max(maxX - minX + 1, maxY - minY + 1)
+    * ((opts and opts.margin) or 0.04)))
+  local sheetWidth, sheetHeight = segmented.region.width, segmented.region.height
+  local rx, ry = math.max(0, minX - margin), math.max(0, minY - margin)
+  local rw = math.min(sheetWidth - 1, maxX + margin) - rx + 1
+  local rh = math.min(sheetHeight - 1, maxY + margin) - ry + 1
+  local background = buffers(rw * rh)
+  local foreground = 0
+  for y = 0, rh - 1 do
+    for x = 0, rw - 1 do
+      local id = valueAt(label, (ry + y) * sheetWidth + rx + x)
+      if ids[id] then
+        foreground = foreground + 1
+      else
+        setValue(background, y * rw + x, 1)
+      end
+    end
+  end
+  return {
+    background = background,
+    region = { x = rx, y = ry, width = rw, height = rh },
+    minX = minX - rx, minY = minY - ry, maxX = maxX - rx, maxY = maxY - ry,
+  }, foreground
+end
+
+local function convertByPieces(image, width, height, threshold, opts)
+  local whole = { x = 0, y = 0, width = width, height = height }
+  local segmented = segmentView(image, whole, threshold)
+  if not segmented then return nil end
+  local pieces, label = labelPieces(segmented)
+  local gap = math.max(3, math.floor(math.min(width, height) * Converter.MERGE_GAP_FRACTION))
+  local groups = groupPieces(pieces, gap, width * height)
+  if #groups < 2 then return nil end
+  -- keep the creatures: anything much smaller than the largest is a speck
+  local largest = groups[1].area
+  local kept = {}
+  for _, group in ipairs(groups) do
+    if group.area >= largest * Converter.MIN_PIECE_FRACTION then kept[#kept + 1] = group end
+  end
+  if #kept < 2 then return nil end
+  table.sort(kept, function(a, b) return a.centreX < b.centreX end)
+  local front, back = {}, {}
+  if #kept == 2 then
+    front[1], back[1] = kept[1], kept[2]
+  else
+    local mid = width / 2
+    for _, group in ipairs(kept) do
+      if group.centreX < mid then front[#front + 1] = group else back[#back + 1] = group end
+    end
+  end
+  if #front == 0 or #back == 0 then return nil end
+  local frontMask = viewMask(segmented, label, front, opts)
+  local backMask = viewMask(segmented, label, back, opts)
+  local frontRows = quantize(image, frontMask, Converter.FRONT_WIDTH, Converter.FRONT_HEIGHT, opts)
+  local backRows = quantize(image, backMask, Converter.BACK_WIDTH, Converter.BACK_HEIGHT, opts)
+  if not (frontRows and backRows
+      and SpriteGenerator.validImageRows(frontRows, Converter.FRONT_WIDTH, Converter.FRONT_HEIGHT)
+      and SpriteGenerator.validImageRows(backRows, Converter.BACK_WIDTH, Converter.BACK_HEIGHT)) then
+    return nil
+  end
+  return {
+    front = frontRows, back = backRows, artFormat = Converter.ART_FORMAT,
+    frontWidth = Converter.FRONT_WIDTH, frontHeight = Converter.FRONT_HEIGHT,
+    backWidth = Converter.BACK_WIDTH, backHeight = Converter.BACK_HEIGHT,
+  }
+end
+
 function Converter.convertImage(image, opts)
   opts = opts or {}
   local width, height, dimErr = dimensions(image)
@@ -377,6 +580,10 @@ function Converter.convertImage(image, opts)
     or Converter.DEFAULT_BACKGROUND_THRESHOLD
   threshold = math.max(0.03,
     math.min(Converter.MAX_BACKGROUND_THRESHOLD, threshold))
+  -- the creatures where they are first; the column cut only when that cannot
+  -- tell two creatures apart
+  local ok, byPieces = pcall(convertByPieces, image, width, height, threshold, opts)
+  if ok and byPieces then return byPieces end
   local slicedRows, lastErr
   for _, split in ipairs(splitCandidates(image, width, height, threshold)) do
     local rows, err, sliced = convertAt(image, split, width, height, threshold, opts)

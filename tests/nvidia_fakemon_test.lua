@@ -410,6 +410,119 @@ T.check(fullBleedErr:find("foreground", 1, true) ~= nil,
 T.check(fullBleedErr:find("%%") ~= nil,
   "a rejected sheet reports the measured foreground share for triage")
 
+
+-- ---------------------------------------------------------------------------
+-- Framing.  A creature that crosses the middle of the sheet used to be sliced
+-- in half by the centred cut, and one stray fleck far from a creature stretched
+-- its bounding box so the creature came out small and off centre.
+-- ---------------------------------------------------------------------------
+
+-- The front creature is wide enough to cross the sheet's midline (x = 100); the
+-- rear one sits well clear of it.  A column cut at 100 slices the front one.
+local function crossingImage()
+  local image = {}
+  function image:getDimensions() return 200, 100 end
+  function image:getPixel(x, y)
+    local fx, fy = (x - 92) / 30, (y - 50) / 38
+    if fx * fx + fy * fy <= 1 then return 0.15, 0.45, 0.72, 1 end
+    local bx, by = (x - 170) / 12, (y - 50) / 34
+    if bx * bx + by * by <= 1 then return 0.28, 0.45, 0.72, 1 end
+    return 0.98, 0.98, 0.98, 1
+  end
+  return image
+end
+local crossing, crossingErr = SpriteConverter.convertImage(crossingImage())
+T.eq(crossingErr, nil, "a creature crossing the sheet's midline converts ("
+  .. tostring(crossingErr) .. ")")
+T.check(wholeView(crossing and crossing.front),
+  "a creature crossing the midline keeps its whole silhouette")
+do
+  local lo, _, hi = rowBounds(crossing and crossing.front or { "00" })
+  T.check(math.abs((lo - 1) - (112 - hi)) <= 3,
+    "and is centred in its frame rather than pushed against the cut")
+end
+T.check(wholeView(crossing and crossing.back),
+  "the rear view beside it is whole too")
+
+-- The fixture creature with a few stray flecks: one in each corner of the front
+-- half, far from the creature.  They must not take part in sizing the frame.
+local function speckedImage()
+  local base = {}
+  function base:getDimensions() return 160, 96 end
+  function base:getPixel(x, y)
+    if x < 80 and ((x >= 3 and x <= 5 and y >= 3 and y <= 5)
+        or (x >= 70 and x <= 74 and y >= 88 and y <= 90)) then
+      return 0.1, 0.1, 0.1, 1
+    end
+    return fixtureImage:getPixel(x, y)
+  end
+  return base
+end
+local clean, specked = converted, SpriteConverter.convertImage(speckedImage())
+-- The flecks themselves are dropped, so the measure is the creature's own size:
+-- its widest row of ink, which shrinks if the frame was fitted to the flecks.
+local function widestRow(rows)
+  local widest = 0
+  for _, row in ipairs(rows) do
+    local first, last
+    for x = 1, #row / 2 do
+      if row:sub(x * 2 - 1, x * 2) ~= "00" then first, last = first or x, x end
+    end
+    if first then widest = math.max(widest, last - first + 1) end
+  end
+  return widest
+end
+T.check(specked ~= nil and widestRow(specked.front) >= widestRow(clean.front) - 2,
+  "stray flecks do not shrink the creature (" .. tostring(specked and widestRow(specked.front))
+  .. " vs " .. tostring(widestRow(clean.front)) .. " px wide)")
+
+-- The same repair for the creatures already stored: the FireRed writer frames
+-- the 112x112 master itself, because the source image is not kept.
+do
+  local SpriteWriter = require("mods.nvidia_fakemon.sprite_writer")
+  local rows = {}
+  for y = 1, 112 do
+    local row = {}
+    for x = 1, 112 do
+      local ink = "00"
+      if x >= 40 and x <= 70 and y >= 30 and y <= 90 then ink = "d8" end   -- the creature
+      if x >= 3 and x <= 8 and y >= 4 and y <= 8 then ink = "d8" end        -- a stray fleck
+      row[x] = ink
+    end
+    rows[y] = table.concat(row)
+  end
+  local definition = { name = "SPECKMON", artFormat = "rgb216a27-v1",
+    frontWidth = 112, frontHeight = 112, backWidth = 112, backHeight = 112,
+    front = rows, back = rows }
+  local realNew, realCreate = love.image.newImageData, love.filesystem.createDirectory
+  local captured = {}
+  love.filesystem.createDirectory = function() return true end
+  love.image.newImageData = function(w, h)
+    local record = { w = w, h = h, opaque = {} }
+    captured[#captured + 1] = record
+    return {
+      setPixel = function(_, x, y, _, _, _, alpha)
+        if alpha and alpha > 0 then record.opaque[#record.opaque + 1] = { x, y } end
+      end,
+      encode = function() return true end,
+    }
+  end
+  local ok, front, _, err = pcall(SpriteWriter.ensureGen3, "NVIDIA_FAKE_099", definition, true)
+  love.image.newImageData, love.filesystem.createDirectory = realNew, realCreate
+  T.check(ok and front ~= nil, "the FireRed writer draws a framed picture (" .. tostring(err or front) .. ")")
+  local picture = captured[1]
+  T.check(picture ~= nil and picture.w == 64 and picture.h == 64, "FireRed pictures are 64x64")
+  local minX, minY, maxX, maxY = 99, 99, -1, -1
+  for _, pixel in ipairs(picture and picture.opaque or {}) do
+    minX, minY = math.min(minX, pixel[1]), math.min(minY, pixel[2])
+    maxX, maxY = math.max(maxX, pixel[1]), math.max(maxY, pixel[2])
+  end
+  T.check(maxY - minY >= 56 and maxX > minX,
+    "the creature fills its frame instead of shrinking to fit a stray fleck")
+  T.check(math.abs(minX - (63 - maxX)) <= 2 and math.abs(minY - (63 - maxY)) <= 2,
+    "and is centred, with the fleck left out of the bounds")
+end
+
 local front, back = {}, {}
 for _ = 1, 28 do front[#front + 1] = string.rep("03", 14) end
 for _ = 1, 16 do back[#back + 1] = string.rep("12", 8) end

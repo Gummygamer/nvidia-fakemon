@@ -250,6 +250,10 @@ return function(mod)
   -- FireRed / LeafGreen: write the generated creature into the live species
   -- rows and give it art at the 64x64 size Gen 3 pictures use.
   local gen3Fronts = {}
+  -- The last record written for each slot.  The engine rebuilds every species
+  -- table from the ROM each time a game is entered (Pokemon.install), which
+  -- puts the placeholder rows back; these are what is written again afterwards.
+  local gen3Records = {}
   local function applyDefinitionGen3(targetGame, slot, definition, forceArt)
     if type(definition) ~= "table" then return nil end
     local repairedArt = SpriteGenerator.ensure(definition)
@@ -281,8 +285,21 @@ return function(mod)
       return nil
     end
     gen3Fronts[slot] = { front = front, back = back }
+    gen3Records[slot] = record
     Gen3.setIcon(record.index, front)
     return true
+  end
+
+  -- Put every generated creature back into the species rows.  Runs after the
+  -- engine reloads them: names, types, stats, learnsets and icons all go back
+  -- to the ROM's (and the boot-time placeholders) on entering the field, which
+  -- is why a loaded save showed FAKE001, FAKE002... instead of its creatures.
+  local function reapplyGen3()
+    for slot, record in pairs(gen3Records) do
+      Gen3.write(game, record)
+      local art = gen3Fronts[slot]
+      if art then Gen3.setIcon(record.index, art.front) end
+    end
   end
 
   local function applyDefinition(targetGame, slot, definition, forceArt)
@@ -343,6 +360,7 @@ return function(mod)
           vanillaFront, vanillaBack))
       end
       gen3Fronts = {}
+      gen3Records = {}
       return
     end
     if not (game and game.data) then return end
@@ -481,7 +499,17 @@ return function(mod)
 
   mod.events:on("game.ready", function(ev)
     game = ev.game
-    if GEN3 then return end
+    if GEN3 then
+      -- Registered here, not while the mod loads: the engine's own hook that
+      -- puts the registered placeholders back is added after the mods have
+      -- run, and hooks run in the order they were added, so this has to come
+      -- later to have the last word.
+      local ok, P = pcall(require, "src.core.game3.pokemon")
+      if ok and type(P) == "table" and type(P.onReload) == "function" then
+        P.onReload(reapplyGen3, "nvidia_fakemon")
+      end
+      return
+    end
     game.data.constants.dexSize = DEX_OFFSET
     game.data.text._NVIDIA_FAKEMON_EMPTY = "Data not generated."
   end)
@@ -490,6 +518,9 @@ return function(mod)
   -- stats first so saved generated party members validate against their slot.
   mod.events:on("save.loading", function(ev)
     local bucket = ev.raw and ev.raw.modData and ev.raw.modData[mod.id]
+    -- Another save may have been loaded before this one, and a creature it
+    -- generated must not outlive it in a slot this save never filled.
+    if GEN3 and game then resetRuntimeSlots() end
     restoreBucket(game, bucket)
   end)
 

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **FireRed / LeafGreen: generated creatures kept their names after loading.**
+  Entering the field runs `Pokemon.install`, which rebuilds every species table
+  from the ROM and puts the boot-time placeholders back, so a loaded save showed
+  FAKE001, FAKE002... in place of its creatures' names (and lost their stats,
+  learnsets and party icons). The mod now writes its creatures again after every
+  species reload, through a hook registered at `game.ready` so it runs after the
+  engine's own, and clears the previous save's creatures when another save is
+  loaded. `tests/gen3_reload_driver.lua` covers it on a real FireRed boot.
+- **Creature art is framed by the creature, not by whatever else is on the
+  sheet.** A stray fleck far from a creature (a label, a spark, a line left by
+  the image model) stretched the bounding box, so the creature came out small and
+  off centre, and one that crossed the middle of the sheet was sliced in half by
+  the cut between the front and back views. The converter now finds the
+  creatures as connected pieces, drops specks, and takes the left one as the
+  front view and the right one as the back view wherever the divider falls; the
+  column cut is kept as the fallback for a sheet it cannot read. Existing
+  creatures cannot be converted again (the source image is not kept), so the
+  FireRed writer reframes their stored 112x112 masters when it draws the 64x64
+  pictures: specks dropped, the creature fitted and centred. A creature that was
+  already cut off in its stored art stays cut off.
+
 - Default `NVIDIA_FAKEMON_MODEL` to `google/gemma-4-31b-it`;
   `minimaxai/minimax-m3` reached end of life on 2026-09-09 and every
   generation request failed. Checked against the live API with the full

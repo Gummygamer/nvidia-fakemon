@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A cut-off creature is asked for again.** Some generated sheets have the
+  creature running off the picture's own edge, or sliced between the front and
+  back views; nothing downstream can put the missing part back, and the source
+  image is not kept. The converter now reports such a sheet as clipped, and the
+  pipeline makes one more image request (a new seed for NIM; Cloudflare is not
+  sent one, so its second image differs on its own). The first result is kept if
+  the retry is no better, a failed request is never retried, and a whole sheet
+  still costs a single request. Creatures already saved with a cut edge stay as
+  they are.
+- Two creatures sitting very close together on the sheet are no longer merged
+  into one piece: the grouping gap tightens until the front and back views are
+  separate.
+
 - **FireRed / LeafGreen: generated creatures kept their names after loading.**
   Entering the field runs `Pokemon.install`, which rebuilds every species table
   from the ROM and puts the boot-time placeholders back, so a loaded save showed

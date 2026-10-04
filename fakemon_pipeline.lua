@@ -5,6 +5,9 @@ local SpriteGenerator = require("mods.nvidia_fakemon.sprite_generator")
 
 local Pipeline = {}
 
+-- Image requests per creature: one, plus one more when the first came back cut off.
+Pipeline.IMAGE_ATTEMPTS = 2
+
 local function callString(object, method, fallbackValue)
   if type(object) ~= "table" or type(object[method]) ~= "function" then return fallbackValue end
   local ok, value = pcall(object[method])
@@ -48,17 +51,39 @@ function Pipeline.fromCompletion(completionBody, context, tag, dependencies)
   if not definition then return nil, metadataErr end
 
   local ran, imageResult, imageErr = pcall(function()
-    local seed = imageClient.seed(definition, context)
+    local baseSeed = imageClient.seed(definition, context)
     local prompt = imageClient.prompt(definition)
-    local request, buildErr = imageClient.buildRequest(definition, context, seed)
-    if not request then return nil, buildErr end
-    local imageBody, requestErr = imageClient.perform(request, tag)
-    if not imageBody then return nil, requestErr end
-    local bytes, parseErr, extension = imageClient.parseResponse(imageBody)
-    if not bytes then return nil, parseErr end
-    local rows, conversionErr = converter.convertBytes(bytes, extension)
-    if not rows then return nil, conversionErr end
-    return { rows = rows, seed = seed, prompt = prompt }
+    -- A sheet whose creature is cut off by the picture's own edge, or sliced
+    -- between the views, cannot be repaired afterwards (the source image is not
+    -- kept), so it is worth one more request: image models are not deterministic
+    -- and the second try is usually whole.  The first usable result is kept if
+    -- the second is no better.
+    local best, bestSeed
+    for attempt = 1, Pipeline.IMAGE_ATTEMPTS do
+      local seed = (tonumber(baseSeed) or 0) + attempt - 1
+      local request, buildErr = imageClient.buildRequest(definition, context, seed)
+      if not request then return nil, buildErr end
+      local imageBody, requestErr = imageClient.perform(request, tag)
+      if not imageBody then
+        -- a failed request is never retried here (a rate limit must not be hit
+        -- twice); but a usable first result stands
+        if best then break end
+        return nil, requestErr
+      end
+      local bytes, parseErr, extension = imageClient.parseResponse(imageBody)
+      if not bytes then
+        if best then break end
+        return nil, parseErr
+      end
+      local rows, conversionErr = converter.convertBytes(bytes, extension)
+      if not rows then
+        if best then break end
+        return nil, conversionErr
+      end
+      if not best or not rows.clipped then best, bestSeed = rows, seed end
+      if not rows.clipped then break end
+    end
+    return { rows = best, seed = bestSeed, prompt = prompt }
   end)
   if not ran then return fallback(definition, imageResult, imageClient) end
   if not imageResult then return fallback(definition, imageErr, imageClient) end

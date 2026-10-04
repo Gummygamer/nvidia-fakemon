@@ -2,7 +2,7 @@ local SpriteGenerator = require("mods.nvidia_fakemon.sprite_generator")
 
 local Converter = {}
 
-Converter.VERSION = 4
+Converter.VERSION = 5
 Converter.DEFAULT_BACKGROUND_THRESHOLD = 0.22
 -- An image model does not always honour "pure white".  A light-grey or subtly
 -- textured backdrop sits outside the default radius, the border flood fill
@@ -527,21 +527,46 @@ local function viewMask(segmented, label, members, opts)
   }, foreground
 end
 
+-- A view whose creature touches the sheet's own edge was cut off by the image
+-- model (the picture ran out of canvas), which no conversion can put back.
+local function touchesSheet(groups, width, height)
+  for _, group in ipairs(groups) do
+    if group.minX <= 0 or group.minY <= 0
+        or group.maxX >= width - 1 or group.maxY >= height - 1 then
+      return true
+    end
+  end
+  return false
+end
+
 local function convertByPieces(image, width, height, threshold, opts)
   local whole = { x = 0, y = 0, width = width, height = height }
   local segmented = segmentView(image, whole, threshold)
   if not segmented then return nil end
   local pieces, label = labelPieces(segmented)
-  local gap = math.max(3, math.floor(math.min(width, height) * Converter.MERGE_GAP_FRACTION))
-  local groups = groupPieces(pieces, gap, width * height)
-  if #groups < 2 then return nil end
-  -- keep the creatures: anything much smaller than the largest is a speck
-  local largest = groups[1].area
-  local kept = {}
-  for _, group in ipairs(groups) do
-    if group.area >= largest * Converter.MIN_PIECE_FRACTION then kept[#kept + 1] = group end
+  -- Pieces that sit close together are one creature (a flame above a head), but
+  -- the front and back creatures can sit close too, and merging them leaves one
+  -- group where there should be two.  So the gap tightens until two remain.
+  local baseGap = math.max(3, math.floor(math.min(width, height) * Converter.MERGE_GAP_FRACTION))
+  local kept
+  for _, gap in ipairs({ baseGap, math.max(1, math.floor(baseGap / 3)), 0 }) do
+    local groups = groupPieces(pieces, gap, width * height)
+    if #groups >= 2 then
+      -- keep the creatures: anything much smaller than the largest is a speck
+      local largest = groups[1].area
+      local candidate = {}
+      for _, group in ipairs(groups) do
+        if group.area >= largest * Converter.MIN_PIECE_FRACTION then
+          candidate[#candidate + 1] = group
+        end
+      end
+      if #candidate >= 2 then
+        kept = candidate
+        break
+      end
+    end
   end
-  if #kept < 2 then return nil end
+  if not kept then return nil end
   table.sort(kept, function(a, b) return a.centreX < b.centreX end)
   local front, back = {}, {}
   if #kept == 2 then
@@ -566,6 +591,10 @@ local function convertByPieces(image, width, height, threshold, opts)
     front = frontRows, back = backRows, artFormat = Converter.ART_FORMAT,
     frontWidth = Converter.FRONT_WIDTH, frontHeight = Converter.FRONT_HEIGHT,
     backWidth = Converter.BACK_WIDTH, backHeight = Converter.BACK_HEIGHT,
+    -- not part of the definition: tells the caller this art is worth asking for
+    -- again
+    clipped = touchesSheet(front, width, height) or touchesSheet(back, width, height)
+      or nil,
   }
 end
 
@@ -589,6 +618,7 @@ function Converter.convertImage(image, opts)
     local rows, err, sliced = convertAt(image, split, width, height, threshold, opts)
     if rows then
       if not sliced then return rows end
+      rows.clipped = true
       slicedRows = slicedRows or rows
     else
       lastErr = err

@@ -444,6 +444,45 @@ end
 T.check(wholeView(crossing and crossing.back),
   "the rear view beside it is whole too")
 
+-- Two creatures only two pixels apart on the sheet: close enough that a loose
+-- merge would call them one creature and leave nothing to tell the views apart.
+local function closeViewsImage()
+  local image = {}
+  function image:getDimensions() return 200, 100 end
+  function image:getPixel(x, y)
+    local fx, fy = (x - 70) / 30, (y - 50) / 38
+    if fx * fx + fy * fy <= 1 then return 0.15, 0.45, 0.72, 1 end
+    local bx, by = (x - 113) / 11, (y - 50) / 34
+    if bx * bx + by * by <= 1 then return 0.28, 0.45, 0.72, 1 end
+    return 0.98, 0.98, 0.98, 1
+  end
+  return image
+end
+local closeViews, closeErr = SpriteConverter.convertImage(closeViewsImage())
+T.eq(closeErr, nil, "two creatures a few pixels apart still convert (" .. tostring(closeErr) .. ")")
+T.check(wholeView(closeViews and closeViews.front) and wholeView(closeViews and closeViews.back),
+  "creatures close together are told apart, each whole")
+
+-- A creature the image model ran out of canvas for is reported as clipped, so
+-- the pipeline can ask again; a whole one is not.
+local function runsOffImage()
+  local image = {}
+  function image:getDimensions() return 200, 100 end
+  function image:getPixel(x, y)
+    local fx, fy = (x - 20) / 36, (y - 50) / 38     -- spills past the left edge
+    if fx * fx + fy * fy <= 1 then return 0.15, 0.45, 0.72, 1 end
+    local bx, by = (x - 150) / 20, (y - 50) / 34
+    if bx * bx + by * by <= 1 then return 0.28, 0.45, 0.72, 1 end
+    return 0.98, 0.98, 0.98, 1
+  end
+  return image
+end
+local clippedSheet = SpriteConverter.convertImage(runsOffImage())
+T.check(clippedSheet ~= nil and clippedSheet.clipped == true,
+  "a creature cut off by the sheet's own edge is reported as clipped")
+T.check(converted.clipped == nil and crossing.clipped == nil,
+  "a whole creature is not reported as clipped")
+
 -- The fixture creature with a few stray flecks: one in each corner of the front
 -- half, far from the creature.  They must not take part in sizing the frame.
 local function speckedImage()
@@ -631,6 +670,51 @@ for key, value in pairs(hybrid.definition) do savedNimArt[key] = value end
 savedNimArt.artSource, savedNimArt.imageProvider = "nim-image", "nim"
 T.check(not SpriteGenerator.ensure(savedNimArt),
   "legacy NIM-derived rows also survive procedural renderer migrations")
+
+-- A sheet whose creature is cut off cannot be repaired afterwards, so a clipped
+-- first result earns one more request; a failed request is never retried.
+do
+  local function attemptRun(results, performFails)
+    local performs, converts = 0, 0
+    local client = {}
+    for key, value in pairs(fakeImageClient) do client[key] = value end
+    client.perform = function()
+      performs = performs + 1
+      if performFails and performs >= performFails then return nil, "temporary outage" end
+      return "image envelope"
+    end
+    local converter = { VERSION = 7, convertBytes = function()
+      converts = converts + 1
+      return results[converts] or results[#results]
+    end }
+    local out = Pipeline.fromCompletion(completion,
+      { mapId = "ROUTE_1", tileset = "OVERWORLD" }, "test",
+      { imageClient = client, converter = converter })
+    return out, performs
+  end
+  local clippedRows = { front = { "clip" }, back = { "clip" }, artFormat = imageRows.artFormat,
+    frontWidth = 112, frontHeight = 112, backWidth = 112, backHeight = 112, clipped = true }
+  local whole = attemptRun({ imageRows })
+  local _, wholePerforms = attemptRun({ imageRows })
+  T.eq(wholePerforms, 1, "a whole sheet costs one image request")
+
+  local retried, retriedPerforms = attemptRun({ clippedRows, imageRows })
+  T.eq(retriedPerforms, 2, "a clipped sheet is asked for again once")
+  T.eq(retried.definition.front[1], imageRows.front[1], "and the whole second sheet is used")
+  T.eq(retried.definition.imageSeed, 4243, "the second request's seed is the one recorded")
+
+  local stillClipped, stillPerforms = attemptRun({ clippedRows, clippedRows })
+  T.eq(stillPerforms, 2, "a second clipped sheet is not asked for a third time")
+  T.eq(stillClipped.definition.front[1], "clip", "and the first clipped sheet is kept rather than none")
+
+  local lostRetry, lostPerforms = attemptRun({ clippedRows }, 2)
+  T.eq(lostPerforms, 2, "a failed retry is not repeated")
+  T.eq(lostRetry.definition.front[1], "clip", "and the clipped first sheet stands")
+
+  local failed, failedPerforms = attemptRun({ imageRows }, 1)
+  T.eq(failedPerforms, 1, "a failed first request is never retried")
+  T.check(failed.warning ~= nil, "and falls back to procedural art as before")
+end
 
 local fallbackClient = {}
 for key, value in pairs(fakeImageClient) do fallbackClient[key] = value end
